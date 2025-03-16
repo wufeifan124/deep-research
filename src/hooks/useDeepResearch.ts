@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { streamText, smoothStream } from "ai";
+import { streamText, smoothStream, type APICallError } from "ai";
 import { parsePartialJson } from "@ai-sdk/ui-utils";
 import { useTranslation } from "react-i18next";
 import Plimit from "p-limit";
@@ -15,7 +15,8 @@ import {
 import { useGoogleProvider } from "@/hooks/useAiProvider";
 import { useTaskStore } from "@/store/task";
 import { useSettingStore } from "@/store/setting";
-import { pick, flat } from "radash";
+import { toast } from "sonner";
+import { pick, flat, isString, isObject } from "radash";
 
 function getResponseLanguagePrompt(lang: string) {
   return `\n\n**Respond in ${lang}**\n\n`;
@@ -36,11 +37,24 @@ function removeJsonMarkdown(text: string) {
   return text.trim();
 }
 
+function handleError(err: unknown) {
+  console.error(err);
+  if (isString(err)) toast.error(err);
+  if (isObject(err)) {
+    const { error } = err as { error: APICallError };
+    if (error.responseBody) {
+      const response = JSON.parse(error.responseBody) as GeminiError;
+      toast.error(`[${response.error.status}]: ${response.error.message}`);
+    } else {
+      toast.error(`[${error.name}]: ${error.message}`);
+    }
+  }
+}
+
 function useDeepResearch() {
   const { t } = useTranslation();
   const taskStore = useTaskStore();
   const google = useGoogleProvider();
-  const [isThinking, setIsThinking] = useState<boolean>(false);
   const [status, setStatus] = useState<string>("");
 
   async function askQuestions() {
@@ -53,9 +67,10 @@ function useDeepResearch() {
       prompt:
         generateQuestionsPrompt(question) + getResponseLanguagePrompt(language),
       experimental_transform: smoothStream(),
+      onError: handleError,
     });
     let content = "";
-    taskStore.updateQuestion(question);
+    taskStore.setQuestion(question);
     for await (const textPart of result.textStream) {
       content += textPart;
       taskStore.updateQuestions(content);
@@ -78,6 +93,7 @@ function useDeepResearch() {
             processSearchResultPrompt(item.query, item.researchGoal) +
             getResponseLanguagePrompt(language),
           experimental_transform: smoothStream(),
+          onError: handleError,
         });
         for await (const part of searchResult.fullStream) {
           if (part.type === "text-delta") {
@@ -97,16 +113,17 @@ function useDeepResearch() {
 
   async function reviewSearchResult() {
     const { language } = useSettingStore.getState();
-    const { query, tasks } = useTaskStore.getState();
-    setStatus(t("research.common.review"));
+    const { query, tasks, suggestion } = useTaskStore.getState();
+    setStatus(t("research.common.research"));
     const learnings = tasks.map((item) => item.learning);
     const result = streamText({
       model: google("gemini-2.0-flash-thinking-exp"),
       system: getSystemPrompt(),
       prompt:
-        reviewSerpQueriesPrompt(query, learnings) +
+        reviewSerpQueriesPrompt(query, learnings, suggestion) +
         getResponseLanguagePrompt(language),
       experimental_transform: smoothStream(),
+      onError: handleError,
     });
 
     const querySchema = getSERPQuerySchema();
@@ -138,7 +155,7 @@ function useDeepResearch() {
 
   async function writeFinalReport() {
     const { language } = useSettingStore.getState();
-    const { query, tasks } = useTaskStore.getState();
+    const { query, tasks, setTitle } = useTaskStore.getState();
     setStatus(t("research.common.writing"));
     const learnings = tasks.map((item) => item.learning);
     const result = streamText({
@@ -148,12 +165,15 @@ function useDeepResearch() {
         writeFinalReportPrompt(query, learnings) +
         getResponseLanguagePrompt(language),
       experimental_transform: smoothStream(),
+      onError: handleError,
     });
     let content = "";
     for await (const textPart of result.textStream) {
       content += textPart;
       taskStore.updateFinalReport(content);
     }
+    const title = content.split("\n\n")[0].replaceAll("#", "").trim();
+    setTitle(title);
     const sources = flat(
       tasks.map((item) => (item.sources ? item.sources : []))
     );
@@ -174,7 +194,6 @@ function useDeepResearch() {
   async function deepResearch() {
     const { language } = useSettingStore.getState();
     const { query } = useTaskStore.getState();
-    setIsThinking(true);
     setStatus(t("research.common.thinking"));
     try {
       let queries = [];
@@ -186,6 +205,7 @@ function useDeepResearch() {
           generateSerpQueriesPrompt(query) +
           getResponseLanguagePrompt(language),
         experimental_transform: smoothStream(),
+        onError: handleError,
       });
 
       const querySchema = getSERPQuerySchema();
@@ -212,18 +232,13 @@ function useDeepResearch() {
         }
       }
       await runSearchTask(queries);
-      await reviewSearchResult();
-      await writeFinalReport();
     } catch (err) {
       console.error(err);
-    } finally {
-      setIsThinking(false);
     }
   }
 
   return {
     status,
-    isThinking,
     deepResearch,
     askQuestions,
     runSearchTask,

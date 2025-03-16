@@ -20,7 +20,7 @@ import { useSettingStore } from "@/store/setting";
 import { useTaskStore } from "@/store/task";
 
 const formSchema = z.object({
-  topic: z.string().min(2).max(500),
+  topic: z.string().min(2),
 });
 
 function Topic() {
@@ -38,9 +38,9 @@ function Topic() {
   async function handleSubmit(values: z.infer<typeof formSchema>) {
     const { apiKey, accessPassword } = useSettingStore.getState();
     if (apiKey || accessPassword) {
-      const { updateQuestion } = useTaskStore.getState();
+      const { setQuestion } = useTaskStore.getState();
       setIsThinking(true);
-      updateQuestion(values.topic);
+      setQuestion(values.topic);
       await askQuestions();
       setIsThinking(false);
     } else {
